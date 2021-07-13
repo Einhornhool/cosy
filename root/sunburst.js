@@ -36,7 +36,8 @@ var colors = {
   "drivers": "#35a9b5",
   "sys": "#5687d1",
   "newlib": "#6ab975",
-  "fill": "#bbbbbb"
+  "fill": "#bbbbbb",
+  "pkg": "#d82d2d"
 };
 
 var DEFAULT_INPUTFILE = 'mem_t.csv'

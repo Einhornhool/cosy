@@ -17,15 +17,15 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import sys
-from os import path
+from os import path, chdir
 import argparse
 import re
 import subprocess
 import copy
 import json
+import logging
 
 import frontend_server
-
 
 def add_sym(target, sym):
     if sym and (sym['addr'] != 0 or sym['sym'] == 'vectors'):
@@ -87,10 +87,11 @@ def get_csvmod(name, size):
     return "%s,%i,%i,%i,%i\n" % (name, size['t'], size['d'], size['b'],
                                  size['sum'])
 
-def dump_modules(symtable):
+def dump_modules(symtable, export_file=None):
     sa = dict()
     sm = size_init()
     for sym in symtable:
+        logging.debug(sym)
         if sym['arcv']:
             k = sym['arcv']
         elif sym['obj']:
@@ -101,29 +102,50 @@ def dump_modules(symtable):
             sa[k] = size_init()
         size_add(sa[k], sym)
         size_add(sm, sym)
-    print_shead()
-    for a in sorted(sa):
-        print_mod(a, sa[a])
-    print_sum(sm)
+
+    if export_file is None:
+        print_shead()
+        for a in sorted(sa):
+            print_mod(a, sa[a])
+        print_sum(sm)
+    else:
+        json.dump(sa, export_file, indent=2, sort_keys=True)
 
 
-def dump_table(symtable):
+def dump_table(symtable, export_file=None):
     # print sizes on module (riot folder) base
     sa = {'size': size_init()}
     for sym in symtable:
+        # logging.debug("=======================================================")
+        # logging.debug("=> Symbol {}".format(sym['sym']))
         size_add(sa['size'], sym)
         tmp = sa
+        # logging.debug("==> Path: {}".format(sym['path']))
         for d in sym['path']:
             if d not in tmp:
                 tmp[d] = {'size': size_init()}
             size_add(tmp[d]['size'], sym)
             tmp = tmp[d]
+
+        # if sym['obj']:
+        #     logging.debug("==> In object [{}]".format(sym['sym'], sym['obj']))
+        # else:
+        #     logging.debug("==> Has no object".format(sym['sym']))
+
+        if sym['obj'] and sym['obj'] not in tmp:
+            tmp[sym['obj']] = {'size': size_init()}
+            size_add(tmp[sym['obj']]['size'], sym)
+            tmp = tmp[sym['obj']]
+
         # add symbol as leaf
         if sym['sym'] not in tmp:
             tmp[sym['sym']] = {'size': size_init()}
         size_add(tmp[sym['sym']]['size'], sym)
-    print_tree(10, sa)
 
+    if export_file is None:
+        print_tree(10, sa)
+    else:
+        json.dump(sa, export_file, indent=2, sort_keys=True)
 
 def write_csv(symtable, csv):
     sa = dict()
@@ -176,7 +198,7 @@ def parse_elffile(elffile, prefix, appdir, riot_base=None):
     return res
 
 
-def parse_mapfile(mapfile):
+def parse_mapfile(mapfile, riot_base):
     res = []
     cur_type = ''
     cur_sym = {}
@@ -246,14 +268,14 @@ def parse_mapfile(mapfile):
                     cur_sym['addr'] = int(m.group(1), 16)
                     cur_sym['size'] = int(m.group(2), 16)
                     # get object and archive files
-                    me = re.match(".+/([-_a-zA-Z0-9]+\.a)\(([-_a-zA-Z0-9]+\.o)\)$", m.group(3))
-                    if me:
-                        cur_sym['arcv'] = me.group(1)
-                        cur_sym['obj'] = me.group(2)
-                    me = re.match(".+/([-_a-zA-Z0-9]+\.o)$", m.group(3))
-                    if me:
-                        cur_sym['arcv'] = ''
-                        cur_sym['obj'] = me.group(1)
+                    me = re.match("^\/(.+\/)*(.+)\.(.+)$", m.group(3))
+                    #me = re.match(".+/([-_a-zA-Z0-9]+\.a)\(([-_a-zA-Z0-9]+\.o)\)$", m.group(3))
+                    if me.group(3) == "o":
+                        if me:
+                            cur_sym['path'] = get_object_c_file_path(me.group(1) + me.group(2), riot_base)
+                            #cur_sym['arcv'] = me.group(1)
+                            cur_sym['obj'] = me.group(2)
+                            cur_sym['arcv'] = path.basename(path.normpath(me.group(1)))
                     continue
 
                 m = re.match(" +0x[0-9a-f]+ +([-_a-zA-Z0-9]+)$", line)
@@ -261,6 +283,29 @@ def parse_mapfile(mapfile):
                     cur_sym['alias'].append(m.group(1))
     return res
 
+def get_object_c_file_path(object_path, riot_base):
+    dep_file = "/" + object_path + ".d"
+    c_file_path = ''
+    res = []
+
+    with open(dep_file, 'r') as f:
+        for i, line in enumerate(f):
+            if i == 1:
+                # 2nd line
+                m = re.match("^\/(.+\/)*(.+)\.(.+)$", line.strip().split(' ')[0])
+                if m and m.group(3) == "c":
+                    c_file_path = "/" + m.group(1) + "/" + m.group(2)
+                break
+
+    if c_file_path != '':
+        c_file_path = path.relpath(c_file_path, riot_base)
+        res = c_file_path.split('/')
+
+    # skip build directory
+    if res[0] == 'build':
+        res = res[1:]
+
+    return res
 
 def symboljoin(symtable, nm_out):
     # get paths from nm-dump output
@@ -289,20 +334,24 @@ def symboljoin(symtable, nm_out):
         if not sym['path'] and sym['arcv'] and sym['arcv'] in otp:
             sym['path'] = otp[sym['arcv']]
 
-
 def check_completeness(symbols):
     wp = []
     for sym in symbols:
         if not sym['path']:
             wp.append(sym)
             sym['path'] = ['unspecified']
-            print(sym)
+            #print(sym)
     if len(wp) > 0:
         print("Warning: %i symbols could not be matched to a path" % (len(wp)))
         print("Your output will be incomplete!")
 
 
 if __name__ == "__main__":
+
+    # change to directory of cosy.py
+    dname = path.dirname(path.abspath(__file__))
+    chdir(dname)
+
     # Define some command line args
     p = argparse.ArgumentParser()
     p.add_argument("appdir", default="../RIOT/examples/hello-world", nargs="?", help="Full path to application dir")
@@ -313,10 +362,19 @@ if __name__ == "__main__":
     p.add_argument("-p", default="", help="Toolchain prefix, e.g. arm-none-eabi-")
     p.add_argument("-m", action="store_true", help="Dump module sizes to STDIO")
     p.add_argument("-v", action="store_true", help="Dump symbol sizes to STDIO")
+    p.add_argument("-e", type=argparse.FileType('w'),
+                   help="Dump module sizes to json file")
     p.add_argument("-c", type=argparse.FileType('w'),
                    help="Write module sizes to cvs file")
-    p.add_argument("-d", action="store_true", help="Don't run as web server")
+    p.add_argument("-t", action="store_true", help="Only terminal, don't run as web server")
+    p.add_argument("--debug", action="store_true", help="Show debug messages")
     args = p.parse_args()
+
+    log_level = logging.INFO
+    if args.debug:
+        log_level = logging.DEBUG
+
+    logging.basicConfig(encoding='utf-8', level=log_level)
 
     # extract path to elf and map file
     base = path.normpath(args.appdir)
@@ -340,7 +398,7 @@ if __name__ == "__main__":
     nm_out = parse_elffile(elffile, args.p, path.abspath(base),
                            args.riot_base)
     # get symbol sizes and addresses archive and object files from map file
-    symtable = parse_mapfile(mapfile)
+    symtable = parse_mapfile(mapfile, args.riot_base)
     # join them into one symbol table
     symboljoin(symtable, nm_out)
     # check if the path for all symbols is set
@@ -349,7 +407,9 @@ if __name__ == "__main__":
     # dump symbols to STDIO if verbose option is set
     if args.v or args.m:
         dump_modules(symtable)
-    if args.v:
+    if args.e:
+        dump_table(symtable, args.e)
+    elif args.v:
         dump_table(symtable)
     if args.c:
         write_csv(symtable, args.c)
@@ -370,5 +430,5 @@ if __name__ == "__main__":
     print("Output of the '" + args.p + "size' command:")
     print(subprocess.check_output((args.p + 'size', elffile)))
 
-    if not args.d:
+    if not args.t:
         frontend_server.run('root', 12345, 'index.html')
