@@ -314,6 +314,10 @@ def symboljoin(symtable, nm_out):
             if (nm['addr'] & 0xfffffffe) == m['addr']:
                 m['path'] = nm['path']
 
+    cryptocell_patterns = '^ssi_|^CRYS_|^Pka|^LLF_|^Pkils|FinalizeAes|^EcWrst|DoubleMdf2Mdf|K512|^SaSi_|^Pki|^_DX|Hash512|^HASH_|FinishHash|^Process|RNG_|InitHash|ecpki|^CRYPTOCELL_|ecDomains|regTemps|CSWTCH'
+
+    cryptoauth_patterns = '^calib_|^at|^hal_|ATCA'
+
     # fill in some known paths
     for sym in symtable:
         if sym['arcv'] == 'libc_s.a' or sym['arcv'] == 'libc_nano.a' or sym['arcv'] == 'libm.a':
@@ -324,6 +328,11 @@ def symboljoin(symtable, nm_out):
             sym['path'] = ['sys', 'syscalls']
         elif sym['sym'] == 'fill':
             sym['path'] = ['fill']
+        elif sym['arcv'] == '':
+            if re.search(cryptocell_patterns, sym['sym']):
+                sym['path'] = ['cpu', 'nrf52', 'cryptocell_lib']
+            elif re.search(cryptoauth_patterns, sym['sym']):
+                sym['path'] = ['pkg', 'cryptoauthlib']
 
     # try to map .a and .o files to known paths
     otp = {}
